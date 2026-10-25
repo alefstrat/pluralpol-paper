@@ -80,7 +80,7 @@ with_progress({
   
   zpos_t1 <- future_lapply(sr_topic1, function(topic) {
     res <- mmm_wrapped_topic(fp, 
-                             ties = 3, 
+                             ties = 3, # change for number of ties
                              tl = "topic_level1", 
                              selected_topic = topic, 
                              df = sr_topic)
