@@ -1,0 +1,149 @@
+---
+title: "mixing_matrices"
+output: html_document
+---
+
+## 1. Global Polarization: Mixing Rates
+
+How have mixing rates changed between subreddits over time? We compute the mixing rates between discrete subgroups and mixing rate z-scores using a Poisson Approximation\footnote{1. For each group, simply subtract the number of expected ties from the of observed ties, then divide by the square root of the expected number of ties. Expected ties are computed by dividing row and column sums by the total number of ties}. A mixed group is included, which encompasses the second and third quartiles of the partisan lean scores. We also run the following robustness checks on our results: 
+
+  1. Excluding political subreddits, in order to ascertain if global results are being driven by explicitly political communities.
+  2. Including the top 1-6 ties to see if the direction and strength of mixing is significantly impacted by including more edges. 
+  3. We also exclude expressly political subreddits to see if they drive results, and relabel any mixed as right-or-left leaning 
+
+
+```{r setup, include=FALSE}
+source("reddit/mix_mat_functions.R") #read in functions
+library(tidyverse)
+library(igraph)
+library(rjson)
+library(data.table)
+library(cowplot)
+library(parallel)
+library(future.apply)
+library(progressr)
+```
+
+# Initial tests evaluating global polarization mixing matrices. These tests *include* politically focused subreddits; masking of mixed subreddits occurs in all_mm_results.
+
+```{r}
+# Plot results for positive network series. Change tie configs as needed, switch no_pol to include/exclude political subreddits.
+
+pps1 <- all_mm_results("your_pos_nets_prefix_here", ties_low = 1, ties_high = 6, no_pol = FALSE)
+pps <- lapply(pps1, make_plot)
+
+# Negative network series
+nps1 <- all_mm_results("your_neg_nets_prefix_here", ties_low = 3, ties_high = 3, no_pol = FALSE)
+nps <- lapply(nps1, make_plot)
+
+```
+
+# Generate plots of the expected and observed values for SI and to verify that o and e are diverging -- that this is not only a function of increasing network size.
+
+```{r}
+# path the network
+fp_pos <- "path_to_positive_igraph_network"
+fp_neg <- "path_to_negative_igraph_network"
+
+# run the functions
+eo_pos <- eo_variants(fp_pos) #put your fp to networks here
+eo_neg <- eo_variants(fp_neg)
+
+#plot
+eo_grids <- Map(eo_grid, eo_pos, eo_neg) #one figure each variation
+eo_grids$mixed
+```
+
+#Topic-level mixing
+
+## Below is an example of how you might run topic-level mixing matrix analysis across all topics at one level, across a network config. There are more elegant ways to do this, I am certain, and please amend this code so it operates on your system. This was run on 30 of 32 cores.
+
+```{r}
+
+sr_topic <- read.csv("subreddit_topic_hierarchy_final.csv") #path to topic data
+sr_topic1 <- unique(sr_topic$topic_level1)
+sr_topic2 <- unique(sr_topic$topic_level2)
+sr_topic3 <- unique(sr_topic$topic_level3)
+sr_topic4 <- unique(sr_topic$topic_level4)
+#handlers(global = TRUE) 
+handlers("progress") 
+
+plan(multisession, workers = 30) 
+fp <- paste0("") #path to folder with network config you want here (e.g. 3 ties)
+
+with_progress({
+  #progress bars
+  p1 <- progressor(steps = length(sr_topic1))
+  p2 <- progressor(steps = length(sr_topic2))
+  p3 <- progressor(steps = length(sr_topic3))
+  p4 <- progressor(steps = length(sr_topic4))
+  
+  zpos_t1 <- future_lapply(sr_topic1, function(topic) {
+    res <- mmm_wrapped_topic(fp, 
+                             ties = 3, 
+                             tl = "topic_level1", 
+                             selected_topic = topic, 
+                             df = sr_topic)
+    
+    p1() # progress bar goes up when a topic finishes
+    return(res)
+  })
+  
+  zpos_t2 <- future_lapply(sr_topic2, function(topic) {
+    res <- mmm_wrapped_topic(fp, 
+                             ties = 3, 
+                             tl = "topic_level2", 
+                             selected_topic = topic, 
+                             df = sr_topic)
+    p2() 
+    return(res)
+  })
+  
+  zpos_t3 <- future_lapply(sr_topic3, function(topic) {
+    res <- mmm_wrapped_topic(fp, 
+                             ties = 3, 
+                             tl = "topic_level3", 
+                             selected_topic = topic, 
+                             df = sr_topic)
+    
+    p3()
+    return(res)
+  })
+  
+  zpos_t4 <- future_lapply(sr_topic4, function(topic) {
+    res <- mmm_wrapped_topic(fp, 
+                             ties = 3, 
+                             tl = "topic_level4", 
+                             selected_topic = topic, 
+                             df = sr_topic)
+    
+    p4()
+    return(res)
+  })
+  
+})
+
+# name lists accordingly
+names(zpos_t1) <- sr_topic1
+names(zpos_t2) <- sr_topic2
+names(zpos_t3) <- sr_topic3
+names(zpos_t4) <- sr_topic4
+# close background sessions
+plan(sequential)
+
+zpts <- lapply(list(zpos_t1, zpos_t2, zpos_t3, zpos_t4), function(x) do.call(rbind, x))
+zpts <- bind_rows(zpts, .id = "id")
+
+zpts %>% group_by(id, from, to, year) %>% 
+  drop_na(`z-score`) %>% 
+  filter(is.finite(`z-score`)) %>% 
+  arrange(id, from, to, year) %>%
+  summarize(mz = mean(`z-score`),
+            p_sig_pos = sum(`z-score`>1.96)/n(),
+            p_sig_neg = sum(`z-score`<(-1.96))/n(),
+            n = n())
+
+#plot as your heart desires.
+```
+
+

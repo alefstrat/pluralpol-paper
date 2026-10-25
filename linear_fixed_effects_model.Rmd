@@ -1,0 +1,133 @@
+---
+title: "linear_fixed_effects_model"
+output: html_document
+---
+
+# Setting up functions
+
+```{r}
+library(tidyverse)
+library(igraph)
+
+compute_entropy <- function(df){
+
+  df[is.na(df)] <- 0
+ 
+  dem <- df['left']
+  rep <- df['right']
+  mod <- df['mixed']
+  pleft <- (dem+1)/(rep+dem+mod+1)
+  pright <- (rep+1)/(rep+dem+mod+1)
+  pmod <- (mod+1)/(rep+dem+mod+1) 
+  entropy <- ( -1*pleft*log2(pleft) - pright*log2(pright) - pmod*log2(pmod)) 
+  df['entropy'] <- entropy
+  return(df)
+}
+
+# This function allows you to also filter and control for topic level if needed.
+prep_data_lp <- function(g, df){
+  set.seed(1001)
+  cd <- centr_degree(g, mode = ("in"))
+  V(g)$'cdi' <- cd$res
+  
+  topic_cols <- c("topic_level1", "topic_level2", "topic_level3", "topic_level4")
+  vertex_matches <- match(V(g)$name, df$subreddit)
+  vertex.attributes(g)[topic_cols] <- df[vertex_matches, 4:7]
+  
+  gdf <- igraph::as_data_frame(g, what = c("both"))
+  
+  zf <- left_join(gdf$edges, gdf$vertices, by = c("from" = "name")) %>% 
+    left_join(.,gdf$vertices, by = c("to" = "name"))
+
+  zf_matches <- zf %>% 
+    mutate(is_match = ifelse(lean_e.x==lean_e.y, 1, 0),
+           is_matchnm = ifelse(lean_enm.x==lean_enm.y, 1, 0),
+           topic1_match = ifelse(topic_level1.x==topic_level1.y, 1, 0),
+           topic2_match = ifelse(topic_level2.x==topic_level2.y, 1, 0),
+           topic3_match = ifelse(topic_level3.x==topic_level3.y, 1, 0),
+           topic4_match = ifelse(topic_level4.x==topic_level4.y, 1, 0)) %>% 
+    group_by(from) %>% 
+    summarise(matches = sum(is_match),
+              matchesnm = sum(is_matchnm),
+              t1 = sum(topic1_match),
+              t2 = sum(topic2_match),
+              t3 = sum(topic3_match),
+              t4 = sum(topic4_match),
+              cdi.x = sum(cdi.x)/3,
+              tot_cdi.y = sum(cdi.y), 
+              lean_e.x = unique(lean_e.x)) %>% 
+    ungroup(.)
+  
+  
+  zf$seen <- 1
+  zfe <- zf %>% dplyr::select(from, lean_e.x, lean_e.y, seen) %>% pivot_wider(names_from=lean_e.y, 
+                                                                values_from = seen, 
+                                                                values_fill = 0,
+                                                                values_fn = sum)
+
+  zf2 <- zf %>% dplyr::select(from, cdi.y) %>% group_by(from) %>% summarize(tot_cdi = sum(cdi.y))
+  #zf2 <- zf2 %>% mutate(score_diff = score.x - score.y) %>% group_by(from) %>% summarise(cumu_score = sum(score_diff))
+
+  zf2 <- left_join(zfe, zf2, by=c("from"))
+  zf_ent <- compute_entropy(zf2) %>% select(from, entropy)
+  
+  zf_final <- left_join(zf_matches, zf_ent, by = c("from"))
+  return(zf_final)
+}
+```
+
+# Prepare data
+
+```{r}
+dfs <- read.csv("data/subreddit_topic_hierarchy_final.csv")
+nets_df_pos <- list()
+
+for (i in 1:6){
+   fns <- list.files(paste0("data/stress_test_nets/", i, "_ties"), full.names = TRUE)[3:20]
+   
+   # Extract the 4-digit year from each file path string
+   years <- str_extract(fns, "\\d{4}")
+   
+   # Read files and assign the years as the list names
+   nets <- list()
+   nets[[i]] <- setNames(lapply(fns, readRDS), years)
+   
+   net_df <- lapply(nets[[i]], prep_data_lp, df=dfs)
+   nets_df_pos[[i]] <- bind_rows(net_df, .id = "year")
+   print(paste0("Done with ", i, " ties"))
+}
+
+ndf <- bind_rows(nets_df_pos, .id = "ties")
+ndf$year <- as.integer(ndf$year)
+ndf$type <- "Positive"
+```
+
+
+# Run the fixed effects model. You can switch network type to determine results for negative nets.
+
+```{r}
+library(lme4)
+library(plm)
+library(tvReg)
+library(fixest)
+
+# Filter to negative for negative network.
+syrs <- ndf %>% group_by(from) %>% arrange(from, year) %>% filter( n() > 2) %>% 
+  mutate(ord = row_number(), ent_year = year[1], trial = 3) %>% filter(ties == 1) 
+
+
+syrs$mper <- syrs$matches/3
+syrs$trial <- 3
+
+# Model bounded strictly between 0 and 3. 
+model_bounded <- feglm(mper ~ ord + cdi.x + tot_cdi.y| from, 
+                       data = syrs, 
+                       family = "quasibinomial",
+                       weights = ~trial,
+                       vcov = ~from)
+
+# Running model checks, etcetera.
+exp(coef(model_bounded))
+summary(model_bounded)
+```
+
